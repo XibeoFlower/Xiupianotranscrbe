@@ -1,8 +1,9 @@
 import os
-import threading
-import subprocess
 import sys
+import threading
 import platform
+import contextlib
+import io
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -10,10 +11,6 @@ APP_TITLE = "Piano Transcriber (Transkun)"
 
 
 def detect_hardware():
-    """
-    Tự dò cấu hình máy: CPU, RAM, và GPU (CUDA) nếu có.
-    Trả về dict thông tin + device đề xuất ('cuda' hoặc 'cpu').
-    """
     info = {
         "cpu_name": platform.processor() or "Không xác định",
         "cpu_cores": os.cpu_count() or 1,
@@ -24,14 +21,12 @@ def detect_hardware():
         "recommended_device": "cpu",
     }
 
-    # RAM (không bắt buộc psutil, dò bằng cách khác nếu không có)
     try:
         import psutil
         info["ram_gb"] = round(psutil.virtual_memory().total / (1024 ** 3), 1)
     except Exception:
         info["ram_gb"] = None
 
-    # GPU qua torch/CUDA
     try:
         import torch
         if torch.cuda.is_available():
@@ -46,6 +41,38 @@ def detect_hardware():
     return info
 
 
+def run_transkun_inprocess(input_path, output_path, device):
+    """
+    Goi truc tiep ham main() cua transkun trong cung tien trinh (khong dung
+    subprocess/sys.executable), de tranh loi khi app da duoc dong goi thanh .exe
+    (luc do sys.executable tro vao chinh file .exe nay chu khong phai python.exe).
+    """
+    from transkun.transcribe import main as transkun_main
+
+    old_argv = sys.argv
+    sys.argv = ["transkun", input_path, output_path, "--device", device]
+
+    stdout_buf = io.StringIO()
+    stderr_buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(stdout_buf), contextlib.redirect_stderr(stderr_buf):
+            transkun_main()
+    except SystemExit as e:
+        # argparse hoac sys.exit() co the duoc goi ben trong; code 0 la binh thuong
+        if e.code not in (0, None):
+            raise RuntimeError(
+                f"transkun thoat voi ma loi {e.code}\n{stderr_buf.getvalue()}"
+            )
+    finally:
+        sys.argv = old_argv
+
+    if not os.path.isfile(output_path):
+        raise RuntimeError(
+            "transkun chay xong nhung khong thay file MIDI dau ra.\n"
+            + stderr_buf.getvalue()[-1500:]
+        )
+
+
 class TranskunApp(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -55,7 +82,7 @@ class TranskunApp(tk.Tk):
 
         self.input_path = tk.StringVar()
         self.output_path = tk.StringVar()
-        self.status = tk.StringVar(value="Sẵn sàng.")
+        self.status = tk.StringVar(value="San sang.")
         self.hw_info = detect_hardware()
         self.device = tk.StringVar(value=self.hw_info["recommended_device"])
 
@@ -65,26 +92,25 @@ class TranskunApp(tk.Tk):
         pad = {"padx": 10, "pady": 6}
 
         tk.Label(self, text=APP_TITLE, font=("Segoe UI", 14, "bold")).pack(pady=(14, 4))
-        tk.Label(self, text="Chuyển file audio piano thành MIDI bằng model Transkun",
+        tk.Label(self, text="Chuyen file audio piano thanh MIDI bang model Transkun",
                  fg="#555").pack()
 
-        # --- Khung thông tin phần cứng tự động dò được ---
-        hw_frame = tk.LabelFrame(self, text="Cấu hình máy (tự động nhận diện)", padx=10, pady=8)
+        hw_frame = tk.LabelFrame(self, text="Cau hinh may (tu dong nhan dien)", padx=10, pady=8)
         hw_frame.pack(fill="x", padx=10, pady=(12, 6))
 
-        cpu_txt = f"CPU: {self.hw_info['cpu_name'][:40]}  ({self.hw_info['cpu_cores']} luồng)"
-        ram_txt = f"RAM: {self.hw_info['ram_gb']} GB" if self.hw_info["ram_gb"] else "RAM: không dò được"
+        cpu_txt = f"CPU: {self.hw_info['cpu_name'][:40]}  ({self.hw_info['cpu_cores']} luong)"
+        ram_txt = f"RAM: {self.hw_info['ram_gb']} GB" if self.hw_info["ram_gb"] else "RAM: khong do duoc"
         tk.Label(hw_frame, text=cpu_txt, anchor="w", justify="left").pack(fill="x")
         tk.Label(hw_frame, text=ram_txt, anchor="w", justify="left").pack(fill="x")
 
         if self.hw_info["gpu_available"]:
             gpu_txt = f"GPU: {self.hw_info['gpu_name']}  (VRAM: {self.hw_info['gpu_vram_gb']} GB)"
             gpu_color = "#0a8a0a"
-            reco_txt = "→ Phát hiện GPU NVIDIA, đề xuất chạy bằng CUDA để nhanh hơn."
+            reco_txt = "-> Phat hien GPU NVIDIA, de xuat chay bang CUDA de nhanh hon."
         else:
-            gpu_txt = "GPU: Không phát hiện GPU NVIDIA hỗ trợ CUDA"
+            gpu_txt = "GPU: Khong phat hien GPU NVIDIA ho tro CUDA"
             gpu_color = "#b00"
-            reco_txt = "→ Sẽ chạy bằng CPU (chậm hơn nhưng vẫn hoạt động bình thường)."
+            reco_txt = "-> Se chay bang CPU (cham hon nhung van hoat dong binh thuong)."
 
         tk.Label(hw_frame, text=gpu_txt, fg=gpu_color, anchor="w", justify="left").pack(fill="x", pady=(4, 0))
         tk.Label(hw_frame, text=reco_txt, fg="#555", anchor="w", justify="left",
@@ -93,28 +119,24 @@ class TranskunApp(tk.Tk):
         frm = tk.Frame(self)
         frm.pack(fill="x", **pad)
 
-        # Input file
-        tk.Label(frm, text="File audio đầu vào:").grid(row=0, column=0, sticky="w")
+        tk.Label(frm, text="File audio dau vao:").grid(row=0, column=0, sticky="w")
         tk.Entry(frm, textvariable=self.input_path, width=48).grid(row=1, column=0, columnspan=2, sticky="we")
-        tk.Button(frm, text="Chọn file...", command=self.pick_input).grid(row=1, column=2, padx=6)
+        tk.Button(frm, text="Chon file...", command=self.pick_input).grid(row=1, column=2, padx=6)
 
-        # Output file
-        tk.Label(frm, text="File MIDI đầu ra:").grid(row=2, column=0, sticky="w", pady=(10, 0))
+        tk.Label(frm, text="File MIDI dau ra:").grid(row=2, column=0, sticky="w", pady=(10, 0))
         tk.Entry(frm, textvariable=self.output_path, width=48).grid(row=3, column=0, columnspan=2, sticky="we")
-        tk.Button(frm, text="Chọn nơi lưu...", command=self.pick_output).grid(row=3, column=2, padx=6)
+        tk.Button(frm, text="Chon noi luu...", command=self.pick_output).grid(row=3, column=2, padx=6)
 
-        # Device (đã tự chọn sẵn theo phần cứng, nhưng vẫn cho đổi tay)
         dev_frame = tk.Frame(self)
         dev_frame.pack(fill="x", **pad)
-        tk.Label(dev_frame, text="Thiết bị xử lý:").pack(side="left")
+        tk.Label(dev_frame, text="Thiet bi xu ly:").pack(side="left")
         dev_values = ["cuda", "cpu"] if self.hw_info["gpu_available"] else ["cpu"]
         ttk.Combobox(dev_frame, textvariable=self.device, values=dev_values,
                      width=8, state="readonly").pack(side="left", padx=8)
-        tk.Label(dev_frame, text="(tự động chọn theo máy, có thể đổi tay)",
+        tk.Label(dev_frame, text="(tu dong chon theo may, co the doi tay)",
                  fg="#777", font=("Segoe UI", 8, "italic")).pack(side="left")
 
-        # Run button
-        self.run_btn = tk.Button(self, text="Bắt đầu Transcribe", bg="#2d7", fg="white",
+        self.run_btn = tk.Button(self, text="Bat dau Transcribe", bg="#2d7", fg="white",
                                   font=("Segoe UI", 11, "bold"), height=2, command=self.run_transcribe)
         self.run_btn.pack(fill="x", padx=10, pady=(16, 6))
 
@@ -125,8 +147,8 @@ class TranskunApp(tk.Tk):
 
     def pick_input(self):
         path = filedialog.askopenfilename(
-            title="Chọn file audio",
-            filetypes=[("Audio files", "*.mp3 *.wav *.m4a *.flac *.ogg"), ("Tất cả", "*.*")]
+            title="Chon file audio",
+            filetypes=[("Audio files", "*.mp3 *.wav *.m4a *.flac *.ogg"), ("Tat ca", "*.*")]
         )
         if path:
             self.input_path.set(path)
@@ -136,7 +158,7 @@ class TranskunApp(tk.Tk):
 
     def pick_output(self):
         path = filedialog.asksaveasfilename(
-            title="Lưu file MIDI",
+            title="Luu file MIDI",
             defaultextension=".mid",
             filetypes=[("MIDI files", "*.mid")]
         )
@@ -148,14 +170,22 @@ class TranskunApp(tk.Tk):
         out = self.output_path.get().strip()
 
         if not inp or not os.path.isfile(inp):
-            messagebox.showerror("Lỗi", "Vui lòng chọn file audio đầu vào hợp lệ.")
+            messagebox.showerror("Loi", "Vui long chon file audio dau vao hop le.")
             return
         if not out:
-            messagebox.showerror("Lỗi", "Vui lòng chọn nơi lưu file MIDI.")
+            messagebox.showerror("Loi", "Vui long chon noi luu file MIDI.")
             return
 
+        out_dir = os.path.dirname(out)
+        if out_dir and not os.path.isdir(out_dir):
+            try:
+                os.makedirs(out_dir, exist_ok=True)
+            except Exception as e:
+                messagebox.showerror("Loi", f"Khong tao duoc thu muc dau ra:\n{e}")
+                return
+
         self.run_btn.config(state="disabled")
-        self.status.set("Đang xử lý, vui lòng đợi (lần đầu có thể chậm)...")
+        self.status.set("Dang xu ly, vui long doi (lan dau co the cham)...")
         self.progress.start(12)
 
         thread = threading.Thread(target=self._worker, args=(inp, out, self.device.get()))
@@ -164,27 +194,22 @@ class TranskunApp(tk.Tk):
 
     def _worker(self, inp, out, device):
         try:
-            cmd = [sys.executable, "-m", "transkun.transcribe", inp, out, "--device", device]
-            result = subprocess.run(cmd, capture_output=True, text=True)
-
-            if result.returncode != 0:
-                raise RuntimeError(result.stderr[-2000:] if result.stderr else "Lỗi không xác định.")
-
+            run_transkun_inprocess(inp, out, device)
             self.after(0, self._on_success, out)
         except Exception as e:
             self.after(0, self._on_error, str(e))
 
     def _on_success(self, out):
         self.progress.stop()
-        self.status.set(f"Hoàn tất! Đã lưu: {out}")
+        self.status.set(f"Hoan tat! Da luu: {out}")
         self.run_btn.config(state="normal")
-        messagebox.showinfo("Xong", f"Transcribe thành công!\nFile MIDI: {out}")
+        messagebox.showinfo("Xong", f"Transcribe thanh cong!\nFile MIDI: {out}")
 
     def _on_error(self, err):
         self.progress.stop()
-        self.status.set("Có lỗi xảy ra.")
+        self.status.set("Co loi xay ra.")
         self.run_btn.config(state="normal")
-        messagebox.showerror("Lỗi khi transcribe", err)
+        messagebox.showerror("Loi khi transcribe", err)
 
 
 if __name__ == "__main__":
