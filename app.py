@@ -1,5 +1,6 @@
 import os
 import sys
+import shutil
 import threading
 import platform
 import contextlib
@@ -10,15 +11,56 @@ from tkinter import filedialog, messagebox, ttk
 APP_TITLE = "Piano Transcriber (Transkun)"
 
 
+def get_app_dir():
+    """Thu muc chua file .exe (khi da dong goi) hoac chua app.py (khi chay bang python)."""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def find_ffmpeg():
+    """
+    Tim ffmpeg theo thu tu:
+    1. Da co san trong PATH he thong.
+    2. File ffmpeg.exe / ffmpeg nam cung thu muc voi app (portable, khong can cai dat).
+    3. Thu muc con 'ffmpeg' hoac 'ffmpeg\\bin' canh app.
+    Neu tim thay o vi tri 2/3, tu dong them vao PATH cho tien trinh hien tai.
+    Tra ve (True, duong_dan) hoac (False, None).
+    """
+    found = shutil.which("ffmpeg")
+    if found:
+        return True, found
+
+    app_dir = get_app_dir()
+    exe_name = "ffmpeg.exe" if platform.system() == "Windows" else "ffmpeg"
+
+    candidate_dirs = [
+        app_dir,
+        os.path.join(app_dir, "ffmpeg"),
+        os.path.join(app_dir, "ffmpeg", "bin"),
+    ]
+
+    for d in candidate_dirs:
+        candidate = os.path.join(d, exe_name)
+        if os.path.isfile(candidate):
+            # Them thu muc nay vao dau PATH de transkun/ffmpeg-python goi duoc
+            os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
+            return True, candidate
+
+    return False, None
+
+
 def detect_hardware():
     info = {
-        "cpu_name": platform.processor() or "Không xác định",
+        "cpu_name": platform.processor() or "Khong xac dinh",
         "cpu_cores": os.cpu_count() or 1,
         "ram_gb": None,
         "gpu_available": False,
         "gpu_name": None,
         "gpu_vram_gb": None,
         "recommended_device": "cpu",
+        "ffmpeg_found": False,
+        "ffmpeg_path": None,
     }
 
     try:
@@ -38,14 +80,17 @@ def detect_hardware():
     except Exception:
         pass
 
+    ok, path = find_ffmpeg()
+    info["ffmpeg_found"] = ok
+    info["ffmpeg_path"] = path
+
     return info
 
 
 def run_transkun_inprocess(input_path, output_path, device):
     """
     Goi truc tiep ham main() cua transkun trong cung tien trinh (khong dung
-    subprocess/sys.executable), de tranh loi khi app da duoc dong goi thanh .exe
-    (luc do sys.executable tro vao chinh file .exe nay chu khong phai python.exe).
+    subprocess/sys.executable), de tranh loi khi app da duoc dong goi thanh .exe.
     """
     from transkun.transcribe import main as transkun_main
 
@@ -58,11 +103,18 @@ def run_transkun_inprocess(input_path, output_path, device):
         with contextlib.redirect_stdout(stdout_buf), contextlib.redirect_stderr(stderr_buf):
             transkun_main()
     except SystemExit as e:
-        # argparse hoac sys.exit() co the duoc goi ben trong; code 0 la binh thuong
         if e.code not in (0, None):
             raise RuntimeError(
                 f"transkun thoat voi ma loi {e.code}\n{stderr_buf.getvalue()}"
             )
+    except FileNotFoundError as e:
+        # Day thuong la loi WinError 2 do khong tim thay ffmpeg.exe
+        raise RuntimeError(
+            "Khong the doc file audio dau vao.\n"
+            "Nguyen nhan pho bien nhat: chua cai FFmpeg hoac FFmpeg chua duoc "
+            "them dung vao PATH.\n\n"
+            f"Chi tiet loi goc: {e}"
+        )
     finally:
         sys.argv = old_argv
 
@@ -77,7 +129,7 @@ class TranskunApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(APP_TITLE)
-        self.geometry("580x430")
+        self.geometry("580x470")
         self.resizable(False, False)
 
         self.input_path = tk.StringVar()
@@ -115,6 +167,15 @@ class TranskunApp(tk.Tk):
         tk.Label(hw_frame, text=gpu_txt, fg=gpu_color, anchor="w", justify="left").pack(fill="x", pady=(4, 0))
         tk.Label(hw_frame, text=reco_txt, fg="#555", anchor="w", justify="left",
                  font=("Segoe UI", 9, "italic")).pack(fill="x", pady=(2, 0))
+
+        if self.hw_info["ffmpeg_found"]:
+            ff_txt = f"FFmpeg: Da tim thay ({self.hw_info['ffmpeg_path']})"
+            ff_color = "#0a8a0a"
+        else:
+            ff_txt = "FFmpeg: KHONG tim thay! Can cai dat truoc khi transcribe."
+            ff_color = "#b00"
+        tk.Label(hw_frame, text=ff_txt, fg=ff_color, anchor="w", justify="left",
+                 wraplength=520).pack(fill="x", pady=(4, 0))
 
         frm = tk.Frame(self)
         frm.pack(fill="x", **pad)
@@ -174,6 +235,22 @@ class TranskunApp(tk.Tk):
             return
         if not out:
             messagebox.showerror("Loi", "Vui long chon noi luu file MIDI.")
+            return
+
+        # Kiem tra lai ffmpeg ngay truoc khi chay, bao loi ro rang thay vi de
+        # transkun bao WinError 2 kho hieu
+        ok, _ = find_ffmpeg()
+        if not ok:
+            messagebox.showerror(
+                "Thieu FFmpeg",
+                "Khong tim thay FFmpeg tren may.\n\n"
+                "Cach khac phuc nhanh nhat (khong can cai dat he thong):\n"
+                "1. Tai FFmpeg ban 'release essentials' tu https://www.gyan.dev/ffmpeg/builds/\n"
+                "2. Giai nen, lay file ffmpeg.exe trong thu muc bin\n"
+                "3. Dat file ffmpeg.exe vao CUNG thu muc voi PianoTranscriber.exe\n"
+                "4. Mo lai app va thu lai\n\n"
+                "Hoac cai FFmpeg va them vao PATH he thong roi khoi dong lai may."
+            )
             return
 
         out_dir = os.path.dirname(out)
