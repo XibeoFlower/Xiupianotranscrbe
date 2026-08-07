@@ -28,7 +28,7 @@ jobs:
         run: pip install pyinstaller
 
       - name: Build .exe
-        run: pyinstaller --onefile --windowed --collect-all torch --collect-all transkun --name "PianoTranscriber" app.py
+        run: pyinstaller --onefile --windowed --collect-all torch --collect-all transkun --collect-all setuptools --collect-all psutil --name "PianoTranscriber" app.py
 
       - name: Upload built app
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
